@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VTT to Grouped SRT Converter</title>
+<script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #f5f5f7; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.container { background: #fff; border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,0.1); padding: 40px; max-width: 800px; width: 100%; }
+h1 { font-size: 1.4em; margin-bottom: 8px; }
+p.desc { color: #666; margin-bottom: 24px; font-size: 0.9em; }
+.params { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+.params label { font-size: 0.85em; color: #444; display: flex; flex-direction: column; gap: 4px; }
+.params input { width: 70px; padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9em; }
+.drop-zone { border: 2px dashed #ccc; border-radius: 8px; padding: 40px 20px; text-align: center; cursor: pointer; transition: border-color 0.2s, background 0.2s; }
+.drop-zone:hover, .drop-zone.dragover { border-color: #007aff; background: #f0f7ff; }
+.drop-zone input { display: none; }
+.drop-zone .label { color: #555; font-size: 0.95em; }
+.status { margin-top: 16px; padding: 12px; border-radius: 6px; display: none; }
+.status.success { display: block; background: #e6f9e6; color: #1a7a1a; }
+.status.error { display: block; background: #fde8e8; color: #b91c1c; }
+.preview { margin-top: 20px; max-height: 500px; overflow: auto; font-size: 0.8em; }
+.group-card { border: 1px solid #e0e0e0; border-radius: 6px; margin-bottom: 8px; overflow: hidden; }
+.group-header { background: #f8f8f8; padding: 6px 12px; font-weight: 600; font-size: 0.9em; display: flex; justify-content: space-between; }
+.group-header .warn { color: #b91c1c; }
+.group-header .ok { color: #1a7a1a; }
+.group-row { padding: 3px 12px 3px 24px; border-top: 1px solid #f0f0f0; display: flex; gap: 12px; }
+.group-row .sec { color: #888; min-width: 40px; text-align: right; }
+.group-row .text { flex: 1; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>VTT to Grouped SRT</h1>
+  <p class="desc">Step 1: URLからVTTをダウンロード → Step 2: 編集したVTTをドロップしてグルーピング済みSRTに変換</p>
+
+  <div class="step-box" style="background: #f8f9fa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 20px;">
+    <h2 style="font-size: 1em; margin-bottom: 12px; color: #333;">Step 1: VTTダウンロード</h2>
+    <p style="font-size: 0.8em; color: #666; margin-bottom: 10px;">Democracy Now記事URL、またはVTT直接URLを入力</p>
+    <div style="display: flex; gap: 8px;">
+      <input type="text" id="urlInput" placeholder="https://www.democracynow.org/2025/7/4/... または .vtt URL" style="flex:1; padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; font-size: 0.9em;">
+      <button id="fetchBtn" style="padding: 8px 16px; background: #007aff; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.9em; white-space: nowrap;">VTTダウンロード</button>
+    </div>
+    <div id="fetchStatus" style="font-size: 0.8em; color: #888; margin-top: 6px;"></div>
+  </div>
+
+  <div class="step-box" style="background: #f8f9fa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 20px;">
+    <h2 style="font-size: 1em; margin-bottom: 12px; color: #333;">Step 2: 編集済みVTTをSRTに変換</h2>
+    <div class="params">
+      <label>目標秒数<input type="number" id="targetSec" value="8" step="0.5"></label>
+      <label>最小秒数<input type="number" id="minSec" value="6" step="0.5"></label>
+      <label>最大秒数<input type="number" id="maxSec" value="11" step="0.5"></label>
+    </div>
+    <div class="drop-zone" id="dropZone">
+      <span class="label">編集済みVTTファイルをドロップ<br>またはクリックして選択</span>
+      <input type="file" id="fileInput" accept=".vtt,.txt">
+    </div>
+  </div>
+
+  <div class="status" id="status"></div>
+  <div class="preview" id="preview"></div>
+</div>
+<script>
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const status = document.getElementById('status');
+const preview = document.getElementById('preview');
+const urlInput = document.getElementById('urlInput');
+const fetchBtn = document.getElementById('fetchBtn');
+const fetchStatus = document.getElementById('fetchStatus');
+
+// Try multiple CORS proxies in order
+const CORS_PROXIES = [
+  url => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+  url => 'https://corsproxy.io/?' + encodeURIComponent(url),
+  url => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(url),
+];
+
+async function fetchWithProxy(url) {
+  for (const proxyFn of CORS_PROXIES) {
+    try {
+      const resp = await fetch(proxyFn(url));
+      if (resp.ok) return await resp.text();
+    } catch(e) { /* try next */ }
+  }
+  throw new Error('全てのプロキシで取得に失敗しました');
+}
+
+fetchBtn.addEventListener('click', async () => {
+  const url = urlInput.value.trim();
+  if (!url) return;
+  fetchBtn.disabled = true;
+  fetchStatus.textContent = '取得中...';
+  try {
+    let vttUrl, slug;
+
+    if (url.endsWith('.vtt')) {
+      vttUrl = url;
+      slug = 'transcript';
+    } else {
+      const html = await fetchWithProxy(url);
+      const vttMatch = html.match(/"url"\s*:\s*"([^"]+\.vtt)"/);
+      if (!vttMatch) throw new Error('VTT URLが見つかりませんでした。ソースを確認してVTT URLを直接入力してください。');
+      vttUrl = vttMatch[1];
+      const urlParts = url.split('/');
+      slug = urlParts[urlParts.length - 1] || urlParts[urlParts.length - 2] || 'transcript';
+    }
+
+    fetchStatus.textContent = 'VTTを取得中...';
+
+    let vttText;
+    try {
+      const directResp = await fetch(vttUrl);
+      if (directResp.ok) {
+        vttText = await directResp.text();
+      } else {
+        throw new Error('direct failed');
+      }
+    } catch(e) {
+      vttText = await fetchWithProxy(vttUrl);
+    }
+
+    if (!slug || slug === 'transcript') {
+      const parts = vttUrl.split('/');
+      slug = parts[parts.length - 2] || 'transcript';
+    }
+    const vttBlob = new Blob([vttText], { type: 'text/vtt' });
+    saveAs(vttBlob, slug + '.vtt');
+
+    fetchStatus.textContent = 'VTTダウンロード完了。編集後にStep 2にドロップしてください。';
+  } catch (err) {
+    fetchStatus.textContent = '';
+    showError('取得エラー: ' + err.message);
+  } finally {
+    fetchBtn.disabled = false;
+  }
+});
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) processFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files.length) processFile(fileInput.files[0]); });
+
+function parseVTT(text) {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const segments = [];
+  let i = 0;
+  if (lines[0] && lines[0].trim().startsWith('WEBVTT')) i = 1;
+  while (i < lines.length) {
+    if (lines[i].trim() === '') { i++; continue; }
+    const tsMatch = lines[i].match(/^(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[.,]\d{3})/);
+    if (tsMatch) {
+      const start = tsMatch[1].replace(',', '.');
+      const end = tsMatch[2].replace(',', '.');
+      i++;
+      const textLines = [];
+      while (i < lines.length && lines[i].trim() !== '') {
+        textLines.push(lines[i].trim());
+        i++;
+      }
+      const duration = timeToSeconds(end) - timeToSeconds(start);
+      segments.push({
+        start: tsMatch[1].replace('.', ','),
+        end: tsMatch[2].replace('.', ','),
+        text: textLines.join(' '),
+        sec: Math.round(duration * 10) / 10
+      });
+    } else {
+      i++;
+    }
+  }
+  return segments;
+}
+
+function timeToSeconds(t) {
+  const parts = t.split(':');
+  return parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2].replace(',', '.'));
+}
+
+function groupSubtitles(rows) {
+  const targetSec = parseFloat(document.getElementById('targetSec').value) || 8;
+  const minSec = parseFloat(document.getElementById('minSec').value) || 6;
+  const maxSec = parseFloat(document.getElementById('maxSec').value) || 11;
+
+  const SPEAKERS = ['AMY GOODMAN:', 'KAREN HAO:', 'JUAN GONZALEZ:', 'JUAN GONZÁLEZ:', 'NERMEEN SHAIKH:'];
+  const STRONG_END = ['.', '!', '?', '."', '!"', '?"', '.\u201d', '!\u201d', '?\u201d'];
+  const CLAUSE_END = [';', ':', '--', '\u2014', '"', ',"', ',\u201d', '\u201d'];
+  const SOFT_END = [','];
+
+  function endsWith(text, endings) {
+    return endings.some(e => text.endsWith(e));
+  }
+  function hasSpeaker(text) {
+    return SPEAKERS.some(sp => text.includes(sp));
+  }
+
+  const groups = [];
+  let current = [];
+  let currentSec = 0;
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const text = row.text.trim();
+    const sec = row.sec;
+
+    if (current.length > 0 && hasSpeaker(text)) {
+      groups.push(current);
+      current = [row];
+      currentSec = sec;
+      continue;
+    }
+
+    current.push(row);
+    currentSec += sec;
+
+    if (endsWith(text, STRONG_END) && currentSec >= minSec) {
+      groups.push(current);
+      current = [];
+      currentSec = 0;
+      continue;
+    }
+
+    if (endsWith(text, CLAUSE_END) && currentSec >= targetSec - 1) {
+      groups.push(current);
+      current = [];
+      currentSec = 0;
+      continue;
+    }
+
+    if (endsWith(text, SOFT_END) && currentSec >= targetSec + 1) {
+      groups.push(current);
+      current = [];
+      currentSec = 0;
+      continue;
+    }
+
+    if (currentSec >= maxSec + 1) {
+      groups.push(current);
+      current = [];
+      currentSec = 0;
+    }
+  }
+
+  if (current.length > 0) {
+    groups.push(current);
+  }
+
+  return groups;
+}
+
+function processFile(file) {
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const baseName = file.name.replace(/\.(vtt|txt\.vtt|txt)$/i, '');
+    processVTTText(e.target.result, baseName);
+  };
+  reader.readAsText(file);
+}
+
+function processVTTText(vttText, baseName) {
+  status.className = 'status';
+  status.style.display = 'none';
+  preview.innerHTML = '';
+
+  try {
+    const segments = parseVTT(vttText);
+    if (segments.length === 0) {
+      showError('VTTセグメントが見つかりませんでした。');
+      return;
+    }
+
+    const groups = groupSubtitles(segments);
+
+    // Build SRT
+    let srt = '';
+    groups.forEach((group, idx) => {
+      const start = group[0].start;
+      const end = group[group.length - 1].end;
+      const text = group.map(r => r.text).join(' ');
+      srt += `${idx + 1}\n`;
+      srt += `${start} --> ${end}\n`;
+      srt += `${text}\n`;
+      srt += `\n`;
+    });
+
+    // Download SRT
+    const blob = new Blob([srt], { type: 'text/srt; charset=utf-8' });
+    saveAs(blob, baseName + '_grouped.srt');
+
+    showSuccess(`変換完了: ${segments.length} セグメント → ${groups.length} グループ`);
+    showPreview(groups);
+  } catch (err) {
+    showError('エラー: ' + err.message);
+  }
+}
+
+function showSuccess(msg) {
+  status.className = 'status success';
+  status.textContent = msg;
+  status.style.display = 'block';
+}
+function showError(msg) {
+  status.className = 'status error';
+  status.textContent = msg;
+  status.style.display = 'block';
+}
+
+function showPreview(groups) {
+  const maxSec = parseFloat(document.getElementById('maxSec').value) || 11;
+  let html = '';
+  const maxGroups = Math.min(groups.length, 50);
+  for (let g = 0; g < maxGroups; g++) {
+    const group = groups[g];
+    const total = Math.round(group.reduce((s, r) => s + r.sec, 0) * 10) / 10;
+    const cls = total > maxSec ? 'warn' : 'ok';
+    html += `<div class="group-card">`;
+    html += `<div class="group-header"><span>No.${g + 1}</span><span class="${cls}">${total}秒</span></div>`;
+    group.forEach(row => {
+      html += `<div class="group-row"><span class="sec">${row.sec}</span><span class="text">${escapeHtml(row.text)}</span></div>`;
+    });
+    html += `</div>`;
+  }
+  if (groups.length > maxGroups) {
+    html += `<p style="text-align:center;color:#888;margin-top:12px">... 他 ${groups.length - maxGroups} グループ</p>`;
+  }
+  preview.innerHTML = html;
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>
